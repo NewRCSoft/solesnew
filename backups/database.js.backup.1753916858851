@@ -1,0 +1,185 @@
+// =============================================
+// config/database.js - Configuración de Base de Datos ACTUALIZADA
+// =============================================
+const mysql = require('mysql2/promise');
+const logger = require('./logger');
+
+const dbConfig = {
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'sistema_stock',
+    port: process.env.DB_PORT || 3306,
+    charset: 'utf8mb4',
+    timezone: 'Z',
+    connectionLimit: 20,
+    acquireTimeout: 60000,
+    timeout: 60000,
+    reconnect: true,
+    multipleStatements: true // Para ejecutar múltiples statements
+};
+
+// Pool de conexiones
+const pool = mysql.createPool(dbConfig);
+
+// Función para obtener conexión
+const getConnection = async () => {
+    try {
+        return await pool.getConnection();
+    } catch (error) {
+        logger.error('Error al obtener conexión:', error);
+        throw error;
+    }
+};
+
+// Función para ejecutar consultas
+const query = async (sql, params = []) => {
+    const queryConnection = await getConnection();
+    try {
+        const [rows] = await queryConnection.execute(sql, params);
+        return rows;
+    } catch (error) {
+        logger.error('Error ejecutando query:', { sql, params, error: error.message });
+        throw error;
+    } finally {
+        queryConnection.release();
+    }
+};
+
+// Función para transacciones
+const transaction = async (callback) => {
+    const transactionConnection = await getConnection();
+    try {
+        await transactionConnection.beginTransaction();
+        const result = await callback(transactionConnection);
+        await transactionConnection.commit();
+        return result;
+    } catch (error) {
+        await transactionConnection.rollback();
+        logger.error('Error en transacción:', error);
+        throw error;
+    } finally {
+        transactionConnection.release();
+    }
+};
+
+// Función para transacciones manuales
+const beginTransaction = async () => {
+    const connection = await getConnection();
+    await connection.beginTransaction();
+    return connection;
+};
+
+const commit = async (connection) => {
+    await connection.commit();
+    connection.release();
+};
+
+const rollback = async (connection) => {
+    await connection.rollback();
+    connection.release();
+};
+
+// Función para verificar conexión
+const testConnection = async () => {
+    try {
+        const testConn = await getConnection();
+        await testConn.ping();
+        testConn.release();
+        logger.info('Conexión a base de datos exitosa');
+        return true;
+    } catch (error) {
+        logger.error('Error de conexión a la base de datos:', error);
+        throw error;
+    }
+};
+
+// Función para obtener información de la base de datos
+const getDatabaseInfo = async () => {
+    try {
+        const [serverInfo] = await query('SELECT VERSION() as version');
+        const [dbName] = await query('SELECT DATABASE() as database_name');
+        const [tableCount] = await query(`
+            SELECT COUNT(*) as table_count 
+            FROM information_schema.tables 
+            WHERE table_schema = DATABASE()
+        `);
+        
+        return {
+            mysql_version: serverInfo[0].version,
+            database_name: dbName[0].database_name,
+            table_count: tableCount[0].table_count,
+            host: dbConfig.host,
+            port: dbConfig.port
+        };
+    } catch (error) {
+        logger.error('Error obteniendo información de DB:', error);
+        throw error;
+    }
+};
+
+// Función para verificar si existe una tabla
+const tableExists = async (tableName) => {
+    try {
+        const [result] = await query(`
+            SELECT COUNT(*) as count 
+            FROM information_schema.tables 
+            WHERE table_schema = DATABASE() AND table_name = ?
+        `, [tableName]);
+        return result[0].count > 0;
+    } catch (error) {
+        logger.error(`Error verificando tabla ${tableName}:`, error);
+        return false;
+    }
+};
+
+// Función para cerrar pool
+const closePool = async () => {
+    try {
+        logger.info('Cerrando pool de conexiones...');
+        await pool.end();
+        logger.info('Pool de conexiones cerrado');
+    } catch (error) {
+        logger.error('Error cerrando pool:', error);
+    }
+};
+
+// Manejar cierre graceful
+process.on('SIGINT', async () => {
+    console.log('Recibida señal SIGINT, cerrando conexiones...');
+    await closePool();
+    process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+    console.log('Recibida señal SIGTERM, cerrando conexiones...');
+    await closePool();
+    process.exit(0);
+});
+
+// Inicializar conexión al cargar el módulo
+(async () => {
+    try {
+        await testConnection();
+        const dbInfo = await getDatabaseInfo();
+        logger.info('Base de datos inicializada:', dbInfo);
+    } catch (error) {
+        logger.error('Error inicializando base de datos:', error);
+        console.error('❌ Error de conexión a la base de datos. Verifica tu configuración en .env');
+    }
+})();
+
+module.exports = {
+    pool,
+    getConnection,
+    query,
+    transaction,
+    beginTransaction,
+    commit,
+    rollback,
+    testConnection,
+    getDatabaseInfo,
+    tableExists,
+    closePool
+};
+
